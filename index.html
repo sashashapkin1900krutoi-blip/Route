@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#12302E">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
+<title>Маршрут</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+:root{--ink:#12302E;--paper:#EEF3F2;--route:#E4572E;--stop:#B3261E;--muted:#5B7370}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:var(--paper);color:var(--ink);display:flex;flex-direction:column;padding-top:env(safe-area-inset-top)}
+#stage{flex:1;position:relative;min-height:0}
+#map{position:absolute;inset:0;visibility:hidden}
+#idle{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:32px;text-align:center;gap:10px}
+#idle h1{font-size:34px;margin:0;letter-spacing:-.02em}
+#idle p{margin:0;color:var(--muted);font-size:17px;line-height:1.4;max-width:300px}
+#panel{background:#fff;padding:16px 20px calc(16px + env(safe-area-inset-bottom));box-shadow:0 -2px 0 rgba(18,48,46,.08);position:relative;z-index:500}
+#stats{display:flex;justify-content:space-between;margin-bottom:14px}
+.s{flex:1}
+.s b{display:block;font-size:30px;font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+.s span{font-size:14px;color:var(--muted)}
+#status{font-size:14px;color:var(--muted);min-height:20px;margin-bottom:10px}
+#btn{width:100%;border:0;border-radius:14px;padding:18px;font-size:22px;font-weight:700;color:#fff;background:var(--ink)}
+#btn.stop{background:var(--stop)}
+#btn:focus-visible{outline:3px solid var(--route);outline-offset:3px}
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="map"></div>
+  <div id="idle"><h1>Маршрут</h1><p>Нажми «Старт» и иди куда хочешь. За тобой на карте будет рисоваться путь.</p></div>
+</div>
+<div id="panel">
+  <div id="stats">
+    <div class="s"><b id="dist">0 м</b><span>пройдено</span></div>
+    <div class="s"><b id="time">0:00</b><span>время</span></div>
+    <div class="s"><b id="back">—</b><span>до старта</span></div>
+  </div>
+  <div id="status"></div>
+  <button id="btn">Старт</button>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+let map,line,startM,meM,watchId,timer,t0,pts=[],dist=0,state='idle',wake=null;
+const $=id=>document.getElementById(id);
+const hav=(a,b)=>{const R=6371000,r=Math.PI/180,dl=(b[0]-a[0])*r,dn=(b[1]-a[1])*r;
+  const x=Math.sin(dl/2)**2+Math.cos(a[0]*r)*Math.cos(b[0]*r)*Math.sin(dn/2)**2;return 2*R*Math.asin(Math.sqrt(x));};
+const fmtD=m=>m<1000?Math.round(m)+' м':(m/1000).toFixed(2)+' км';
+const fmtT=s=>{const h=Math.floor(s/3600),m=Math.floor(s%3600/60),c=s%60;
+  return (h?h+':'+String(m).padStart(2,'0'):m)+':'+String(c).padStart(2,'0');};
+function initMap(){
+  $('idle').style.display='none';$('map').style.visibility='visible';
+  if(!map){
+    map=L.map('map',{zoomControl:false});
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'}).addTo(map);
+    map.setView([55.75,37.62],5);
+  }
+  map.invalidateSize();
+}
+async function lock(){try{wake=await navigator.wakeLock.request('screen');}catch(e){}}
+function start(){
+  if(!navigator.geolocation){$('status').textContent='Геолокация недоступна на этом устройстве.';return;}
+  initMap();
+  [line,startM,meM].forEach(l=>l&&map.removeLayer(l));
+  line=L.polyline([],{color:'#E4572E',weight:6,opacity:.95}).addTo(map);
+  pts=[];dist=0;startM=meM=null;
+  state='run';t0=Date.now();
+  $('btn').textContent='Стоп';$('btn').className='stop';
+  $('dist').textContent='0 м';$('back').textContent='—';
+  $('status').textContent='Ищу сигнал GPS…';
+  timer=setInterval(()=>$('time').textContent=fmtT(Math.floor((Date.now()-t0)/1000)),1000);
+  watchId=navigator.geolocation.watchPosition(onPos,onErr,{enableHighAccuracy:true,maximumAge:0,timeout:30000});
+  lock();
+}
+function onPos(p){
+  const acc=p.coords.accuracy,ll=[p.coords.latitude,p.coords.longitude];
+  if(acc>40){$('status').textContent='Сигнал слабый, точность '+Math.round(acc)+' м…';return;}
+  $('status').textContent='';
+  if(!pts.length){
+    pts=[ll];
+    startM=L.circleMarker(ll,{radius:9,color:'#fff',weight:3,fillColor:'#12302E',fillOpacity:1}).addTo(map).bindTooltip('Старт');
+    meM=L.circleMarker(ll,{radius:8,color:'#fff',weight:3,fillColor:'#E4572E',fillOpacity:1}).addTo(map);
+    map.setView(ll,18);
+  }else{
+    const step=hav(pts[pts.length-1],ll);
+    if(step<Math.max(4,acc/2)){meM.setLatLng(ll);return;}
+    pts.push(ll);dist+=step;line.setLatLngs(pts);meM.setLatLng(ll);map.panTo(ll);
+  }
+  $('dist').textContent=fmtD(dist);
+  $('back').textContent=fmtD(hav(ll,pts[0]));
+}
+function onErr(e){
+  $('status').textContent=e.code===1?'Нет доступа к геолокации. Разреши её в настройках браузера.':'Не удалось определить место, попробуй выйти на открытое пространство.';
+}
+function stop(){
+  navigator.geolocation.clearWatch(watchId);clearInterval(timer);
+  if(wake){wake.release();wake=null;}
+  state='done';
+  $('btn').textContent='Начать заново';$('btn').className='';
+  if(pts.length>1)map.fitBounds(line.getBounds(),{padding:[40,40]});
+  $('status').textContent='Готово: '+fmtD(dist)+' за '+$('time').textContent+'.';
+}
+$('btn').onclick=()=>state==='run'?stop():start();
+document.addEventListener('visibilitychange',()=>{if(state==='run'&&document.visibilityState==='visible')lock();});
+if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});
+</script>
+</body>
+</html>
